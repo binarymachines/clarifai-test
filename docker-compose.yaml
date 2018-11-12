@@ -1,0 +1,13 @@
+version: "3.1"
+services:
+        postgres:
+                image: postgres
+                networks:
+                        - default 
+                environment:
+                        - POSTGRES_PASSWORD=notobvious
+                        - POSTGRES_USER=dba
+                ports:
+                        - 6432:5432
+
+                        

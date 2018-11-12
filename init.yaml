@@ -1,0 +1,34 @@
+# 
+# YAML initfile for data engineering challenge utility
+#
+globals:
+        project_home: $CLARIFAI_HOME
+        service_module: db_services
+
+
+# Service objects are long-running singletons that are spun up on application start.
+# They are a simple and easily-comprehensible way of doing dependency injection.
+# Snap, Mercury, and other binarymachines repos all use the ServiceObject pattern.
+#
+service_objects:
+
+        postgres:
+                class: PostgreSQLServiceObject
+                init_params:
+                        - name: database
+                          value: testdb
+
+                        - name: schema
+                          value: public
+                          
+                        - name: host
+                          value: localhost
+
+                        - name: port
+                          value: 6432
+                          
+                        - name: username
+                          value: dba
+                          
+                        - name: password
+                          value: $CLARIFAI_DB_PASSWORD

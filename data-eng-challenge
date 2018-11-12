@@ -1,0 +1,160 @@
+#!/usr/bin/env python
+
+'''Usage:
+       data-eng-challenge <initfile> --unique-models
+       data-eng-challenge <initfile> --average-duration
+       data-eng-challenge <initfile> --call-duration-average <millis>
+       data-eng-challenge <initfile> --highest-duration
+       data-eng-challenge <initfile> --create-rollup
+'''
+
+# Clarifai data engineering code challenge
+
+import os
+import sys
+import re
+import copy
+import json
+import docopt
+from snap import snap, common
+import sqlalchemy
+from sqlalchemy import create_engine, MetaData, Table
+
+millisecond_rx = re.compile(r'^[0-9]+ms$')
+
+UNIQUE_MODELS_QUERY = '''
+SELECT DISTINCT(NAME) FROM models
+'''
+
+AVG_DURATION_QUERY = '''
+SELECT CAST(AVG(duration_ms) AS INTEGER) FROM clarifai_events_test
+'''
+
+AVG_DURATION_THRESHOLD_QUERY = '''
+SELECT m.id as "model_id",
+m.name AS "model_name",
+CAST(AVG(cet.duration_ms) AS INTEGER) AS "avg_call_duration"
+FROM models m JOIN clarifai_events_test cet
+ON cet.model_id = m.id
+GROUP BY m.id, m.name
+HAVING AVG(cet.duration_ms) < :threshold
+'''
+
+LONGEST_DURATION_QUERY = '''
+SELECT model_name, avg_call_duration
+FROM clarifai_events_ru
+WHERE avg_call_duration = 
+(SELECT MAX(avg_call_duration) FROM clarifai_events_ru)
+'''
+
+ROLLUP_TABLE_CREATE_SCRIPT = '''
+SELECT model_id, CAST(AVG(duration_ms) AS INTEGER) AS "average_call_duration" 
+INTO TEMP TABLE call_stats
+FROM clarifai_events_test GROUP BY model_id;
+
+SELECT
+m.id,
+m.name AS "model_name",
+cet.timestamp,
+cet.duration_ms,
+cs.average_call_duration
+INTO TABLE clarifai_events_ru
+FROM models m, clarifai_events_test cet, call_stats cs
+WHERE cet.model_id = m.id
+AND cs.model_id = m.id
+AND m.name IS NOT NULL
+ORDER BY
+date_part('hour', cet.timestamp),
+date_part('day', cet.timestamp),
+m.name, 
+cs.average_call_duration;
+'''
+
+
+def compute_avg_call_duration(session):
+    """Return the average call duration across all calls 
+    in milliseconds as an integer
+    """
+    result = session.execute(AVG_DURATION_QUERY)
+    return result.first()[0]
+
+
+def get_unique_models(session):
+    """Return a list of model names
+    """
+    result = session.execute(UNIQUE_MODELS_QUERY)
+    data = []
+    for record in result.fetchall():
+        data.append(record[0])
+    return data
+
+
+def get_models_by_avg_call_duration_under_threshold(time_millis, session):
+    """Return a list of model names whose average call duration is less than
+    the integer time_millis
+    """
+    result = session.execute(AVG_DURATION_THRESHOLD_QUERY, {'threshold': time_millis})
+    data = []
+    for record in result.fetchall():
+        data.append(record[1])
+    return data
+        
+
+def get_longest_call_duration_model(session):
+    """Return the name of the model with the longest average call duration
+    """
+    result = session.execute(LONGEST_DURATION_QUERY)
+    return result.first()[0]
+
+
+def main(args):    
+    init_filename = args['<initfile>']
+
+    # This is our standard dependency injection boilerplate. A ServiceObject
+    # is a long-running singleton that is initialized on application startup.
+    
+    yaml_config = common.read_config_file(init_filename)        
+    services = common.ServiceObjectRegistry(snap.initialize_services(yaml_config))
+    db_svc = services.lookup('postgres')
+
+    if args['--unique-models']:
+        with db_svc.txn_scope() as session:
+            print(len(get_unique_models(session)))
+
+    if args['--average-duration']:
+        with db_svc.txn_scope() as session:
+            print('%d milliseconds' % compute_avg_call_duration(session))
+
+    if args['--call-duration-average']:
+        with db_svc.txn_scope() as session:
+            millisecs_raw = args['<millis>']
+            
+            # bulletproof the inputs a bit
+            if not millisecond_rx.match(millisecs_raw):
+                print('The milliseconds parameter must match the format <X>ms (where X is a positive integer).')
+                return
+            time_millis = int(millisecs_raw[:-2])
+            print('\n'.join(get_models_by_avg_call_duration_under_threshold(time_millis, session)))
+            
+    if args['--highest-duration']:        
+        with db_svc.txn_scope() as session:
+            try:
+                print(get_longest_call_duration_model(session))
+            # TODO: add except blocks to catch other errors (for example, inability to reach the DB)
+            except sqlalchemy.exc.ProgrammingError as err:
+                print('!!! Rollup table has not been created. Please re-run this script with the --create-rollup arg.')
+
+    if args['--create-rollup']:
+        with db_svc.txn_scope() as session:
+            try:
+                session.execute(ROLLUP_TABLE_CREATE_SCRIPT)
+                print('Rollup table created successfully.')
+            except Exception as err:
+                print('!!! Rollup table creation failed with the following error:')
+                print(err)
+
+
+if __name__ == '__main__':
+    args = docopt.docopt(__doc__)
+    main(args)
+
